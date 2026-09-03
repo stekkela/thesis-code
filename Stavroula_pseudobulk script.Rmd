@@ -1,0 +1,90 @@
+---
+title: "Pseudo_Bulk"
+output: html_notebook
+---
+
+
+```{r}
+library(Seurat)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+```
+
+```{r}
+#load your object
+object <- readRDS("/file/pathway/to/object/PhD/object.rds")
+
+### How to add another column to your metadata
+Idents(object) <- object$orig.ident
+levels(object)
+Group <- c("Keloid","Keloid","Keloid", "Normal","Normal","Normal")
+names(Group) <- levels(object)
+object <- RenameIdents(object, Group)
+object[["Group"]] <- Idents(object = object) #to add clusters to metadata.
+
+
+```
+
+1. Subset for cell type
+2. Subset these by sample
+ 
+ 
+This will give objects with cell type by patient ID for all samples. 
+
+
+```{r}
+
+#subsetting by fibroblasts
+Idents(object) <- object$seurat_clusters
+object_fibros <- subset(x = object, idents = (("4")))
+
+#subsetting by orig.ident
+Idents(object_fibros) <- object_fibros$orig.ident
+KDF1 <- subset(x = object_fibros, idents = (("KDF1")))
+KDF2 <- subset(x = object_fibros, idents = (("KDF2")))
+KDF3 <- subset(x = object_fibros, idents = (("KDF3")))
+NDF1 <- subset(x = object_fibros, idents = (("NDF1")))
+NDF2 <- subset(x = object_fibros, idents = (("NDF2")))
+NDF3 <- subset(x = object_fibros, idents = (("NDF3")))
+
+```
+
+turn each into a matrix and sum the counts for each gene - repeat for all  files 
+
+```{r}
+KDF1 <- GetAssayData(KDF1, slot = "data")
+KDF1 <- as.matrix(KDF1)
+KDF1 <- rowSums(KDF1)
+
+KDF2 <- GetAssayData(KDF2, slot = "data")
+KDF2 <- as.matrix(KDF2)
+KDF2 <- rowSums(KDF2)
+
+KDF3 <- GetAssayData(KDF3, slot = "data")
+KDF3 <- as.matrix(KDF3)
+KDF3 <- rowSums(KDF3)
+
+NDF1 <- GetAssayData(NDF1, slot = "data")
+NDF1 <- as.matrix(NDF1)
+NDF1 <- rowSums(NDF1)
+
+NDF2 <- GetAssayData(NDF2, slot = "data")
+NDF2 <- as.matrix(NDF2)
+NDF2 <- rowSums(NDF2)
+
+NDF3 <- GetAssayData(NDF3, slot = "data")
+NDF3 <- as.matrix(NDF3)
+NDF3 <- rowSums(NDF3)
+
+```
+
+combine all the rowSums file into one and export. 
+
+```{r}
+fibs_matrix <- cbind(KDF1, KDF2, KDF3, NDF1, NDF2, NDF3) 
+write.table(fibs_matrix, file = "fibs_matrix_pseudo_output.txt")
+
+```
+
+Use the pseudobulk output and run through DESEQ2
