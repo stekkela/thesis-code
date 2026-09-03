@@ -1,0 +1,31 @@
+#!/bin/bash
+#$ -pe smp 4
+#$ -l h_vmem=1G
+#$ -l h_rt=1:0:0
+#$ -cwd
+#$ -j y
+set -e
+module load miniconda
+if { mamba env list | grep 'TOBIAS_ENV'; }  >/dev/null 2>&1; then
+    echo removing existing TOBIAS_ENV...
+    mamba remove --name TOBIAS_ENV --all
+fi
+if [ ! -d TOBIAS ]
+then
+    echo no existing TOBIAS directory
+    git clone https://github.com/loosolab/TOBIAS.git
+else
+    echo TOBIAS directory exists
+    cd TOBIAS
+    git pull
+    cd ..
+fi
+cd TOBIAS/
+mamba clean -a -y
+mamba env create -f tobias_env.yaml
+mamba activate TOBIAS_ENV
+mamba install -y tobias -c bioconda
+
+$ TOBIAS ATACorrect --bam test_data/Bcell.bam --genome test_data/genome.fa.gz --peaks test_data/merged_peaks.bed --blacklist test_data/blacklist.bed --outdir ATACorrect_test --cores 8
+$ TOBIAS FootprintScores --signal test_data/Bcell_corrected.bw --regions test_data/merged_peaks.bed --output Bcell_footprints.bw --cores 8
+$ TOBIAS BINDetect --motifs test_data/motifs.jaspar --signals test_data/Bcell_footprints.bw test_data/Tcell_footprints.bw --genome test_data/genome.fa.gz --peaks test_data/merged_peaks_annotated.bed --peak_header test_data/merged_peaks_annotated_header.txt --outdir BINDetect_output --cond_names Bcell Tcell --cores 8
