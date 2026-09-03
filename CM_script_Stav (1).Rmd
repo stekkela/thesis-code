@@ -1,0 +1,209 @@
+---
+title: "incarta"
+author: "TB"
+date: ''
+output: html_document
+---
+# Install packages
+```{r}
+install.packages("gplots")
+install.packages("RColorBrewer")
+install.packages("tidyverse")
+install.packages("dendextend")
+install.packages("janitor")
+install.packages("dplyr")
+install.packages("caret")
+```
+
+#  load packages
+```{r}
+
+library("gplots")
+library("RColorBrewer")
+library("tidyverse")
+library("janitor")
+library("dendextend")
+library("dplyr")
+library("caret")
+library("matrixStats")
+library("plyr")
+library("corrplot")
+
+```
+Function to compute medians of normalized data
+```{r}
+compute_medians <- function(df, experiment_label=NULL) {
+  if(!is.null(experiment_label)){df = subset(df, experiment==experiment_label)}
+  experiments = unique(df['experiment'])
+  listOfdfs <- vector(mode = "list", length = length(experiments))
+  for (i in 1:length(experiments)){
+    single_df = subset(df, experiment==experiments[[i]])
+    n  = ncol(single_df)
+    df_omit = single_df[-c(n-1,n)]
+    #Scaling measures 
+    df_scale <- data.frame(scale(df_omit))
+    df_scale$cellType = single_df$cellType
+    listOfdfs[[i]] = df_scale
+  }
+  df_combined = na.omit(bind_rows(listOfdfs))
+  #Median per condition
+  m  = ncol(df_combined)
+  med <- aggregate(df_combined[c(1:(m-1))],df_combined[m],median)
+  med = as.data.frame(column_to_rownames(med, var = "cellType"))
+  return(med)
+}
+```
+
+```{r}
+reduce_features <- function(paths, names, well_labels,experiment_labels, save_prefix, use_base_names_only=TRUE) {
+  listOfdfs <- vector(mode = "list", length = length(paths))
+  for (i in 1:length(paths)){
+    single_df <- read.csv(paths[[i]])
+    n  = ncol(single_df)
+    single_df = subset(single_df, WELL.LABEL==well_labels[[i]])
+    if(use_base_names_only){
+         base_names = c('Nuclei.Area.wv1','Nuclei.Form.Factor.wv1','Nuclei.Elongation.wv1','Nuclei.Compactness.wv1','Nuclei.Chord.Ratio.wv1','Nuclei.Gyration.Radius.wv1','Nuclei.Displacement.wv1','Nuclei.Diameter.wv1','Nuclei.Perimeter.wv1','Nuclei.Intensity.wv1','Nuclei.Total.Intensity.wv1','Nuclei.Intensity.CV.wv1','Nuclei.Light.Flux.wv1','Nuclei.Intensity.SD.wv1','Nuclei.Major.Axis.wv1','Nuclei.Minor.Axis.wv1','Nuclei.Spacing..SOI..wv1','Nuclei.Neighbor.Count..SOI..wv1','Nuclei.Spacing..MIN..wv1','Nuclei.Neighbor.Count..MIN..wv1','Nuclei.Spacing..Gabriel..wv1','Nuclei.Neighbor.Count..Gabriel..wv1','Nuclei.Spacing..Lune..wv1','Nuclei.Neighbor.Count..Lune..wv1','Nuclei.Skewness.wv1','Nuclei.Kurtosis.wv1','Nuclei.Energy.wv1','Nuclei.Entropy.wv1','Nuclei.Grey.Level.Non.uniformity.wv1','Nuclei.High.Grey.Level.Run.Emphasis.wv1','Nuclei.Low.Grey.Level.Run.Emphasis.wv1','Nuclei.Run.Length.Non.uniformity.wv1','Cells.Area.wv2','Cells.Form.Factor.wv2','Cells.Elongation.wv2','Cells.Compactness.wv2','Cells.Chord.Ratio.wv2','Cells.Gyration.Radius.wv2','Cells.Nuc.Cell.Area.wv2','Cells.Diameter.wv2','Cells.Perimeter.wv2','Cells.Intensity..Cell..wv2','Cells.Intensity..Cyto..wv2','Cells.Total.Intensity..Cell..wv2','Cells.Total.Intensity..Cyto..wv2','Cells.Intensity.CV..Cell..wv2','Cells.Intensity.CV..Cyto..wv2','Cells.Intensity.Spreading.wv2','Cells.Light.Flux.wv2','Cells.Nuc.Cyto.Intensity.wv2','Cells.Intensity.SD..Cell..wv2','Cells.Intensity.SD..Cyto..wv2','Cells.Major.Axis.wv2','Cells.Minor.Axis.wv2','Cells.Skewness.wv2','Cells.Kurtosis.wv2','Cells.Energy.wv2','Cells.Entropy.wv2','Cells.Grey.Level.Non.uniformity.wv2','Cells.High.Grey.Level.Run.Emphasis.wv2','Cells.Low.Grey.Level.Run.Emphasis.wv2','Cells.Run.Length.Non.uniformity.wv2')
+      single_df = single_df[base_names]
+    } else {
+      single_df = single_df[-c(1:10, (n-3):n)]
+    }
+    
+    single_df$cellType <- names[[i]]
+    single_df$experiment <- experiment_labels[[i]]
+    listOfdfs[[i]] <- single_df
+  }
+  df = na.omit(bind_rows(listOfdfs))
+  n  = ncol(df)
+  numdata <- df[-c(n-1,n)]
+  numdatadf <- data.frame(numdata)
+  numdatadf <- sapply(numdatadf,as.numeric)
+  
+  #This is for corrplot
+  
+  col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+  
+  #This Generates Correlation Matrix
+  df_cor <- cor(numdatadf, use=c("pairwise.complete.obs"))
+  #makes labels fit in margins
+  par(xpd=TRUE)
+  corrplot(df_cor, method="color", col=col(20), 
+           type="upper", order="hclust", tl.cex = 0.01, # Add coefficient of correlation
+           tl.col="black", tl.srt=90, #Text label color and rotation
+           # hide correlation coefficient on the principal diagonal
+           diag=T,mar = c(2, 0, 1, 0))
+  
+
+  High_corr <- findCorrelation(df_cor, cutoff = .9, verbose = TRUE, names = TRUE)
+  
+  
+  hc = findCorrelation(df_cor, cutoff=0.9) # putt any value as a "cutoff"
+  hc = sort(hc)
+  reduced_data = df[,-c(hc)]
+  reduced_data <- as.data.frame(reduced_data)
+  
+  if(!dir.exists(save_prefix)) {dir.create(save_prefix)}
+  #Full Matrix - Including Highly Correlated
+  write.csv(df_cor, file.path(save_prefix,paste(save_prefix, "Correlation Matrix.csv", sep="_")))
+  #Remaining Measures Matrix
+  write.csv(reduced_data, file.path(save_prefix,paste(save_prefix,"Reduced Data.csv", sep="_")))
+  #Removed Measures
+  write.csv(High_corr, file.path(save_prefix,paste(save_prefix,"Correlated Measures.csv", sep="_")))
+  return(reduced_data)
+}
+```
+
+```{r}
+#set working directory where all files are
+setwd("C:\\Users\\hmz189\\OneDrive - Queen Mary, University of London\\Experiments\\Cell_Morphology")
+
+
+paths = c("LAM5_CAF3.csv","LAM5_CAF4.csv","LAM5_CAF28.csv")
+names = c('CAF3_L221','CAF4_L221','CAF28_L221')
+well_labels = c('G - 9', 'H - 9', 'F - 9')
+experiment_labels = c('a','a','a')
+save_prefix= 'name'
+
+reduced_data = reduce_features(paths,names,well_labels, experiment_labels, save_prefix)
+medians = compute_medians(reduced_data)
+```
+
+#Building heatmap
+```{r}
+breaks <- unique(c(seq(-1,-0.011,length=100),seq(-0.011,0.01,length=100), seq(0.011,1,length=100)))
+my_palette <- colorRampPalette(c("red","white", "white", "blue"))(length(breaks)-1)
+
+par(mar=c(12,10,15,19)+0.1)
+
+pdf(file.path(save_prefix,paste(save_prefix,"heatmap.pdf", sep="_")), paper="a4", width=8, height=8)
+
+heatmap <- heatmap.2(as.matrix(t(medians)), col=my_palette, breaks = breaks, key=TRUE, trace="none", main="InCarta", key.title = 1,   cexRow=0.6, cexCol=1.0,    distfun = function(x) dist(x, method = "euclidean"),
+          hclust=function(x) hclust(x,method="ward.D2"), symkey=F, density.info=c("none"),
+          lwid=c(1,4),margins=c(12,12))
+dev.off()
+```
+
+BAR PLOTS:
+
+```{r}
+compare = transpose(abs(medians["Control",] - medians["ptCAF",]))[[1]]
+sorted_by_diff = compare[order(unlist(compare),decreasing=TRUE)]
+par(mar=c(4,15,1,1))
+barplot(unlist(sorted_by_diff[1:10]), las=2, main= "Control vs ptCAF", horiz=TRUE, cex.names=0.8)
+```
+
+```{r}
+compare = transpose(abs(medians["Control",] - medians["rtCAF",]))[[1]]
+sorted_by_diff = compare[order(unlist(compare),decreasing=TRUE)]
+par(mar=c(4,15,1,1))
+barplot(unlist(sorted_by_diff[1:10]), las=2, main= "Control vs rtCAF", horiz=TRUE, cex.names=0.8)
+```
+
+```{r}
+compare = transpose(abs(medians["ptCAF",] - medians["rtCAF",]))[[1]]
+sorted_by_diff = compare[order(unlist(compare),decreasing=TRUE)]
+par(mar=c(4,15,1,1))
+barplot(unlist(sorted_by_diff[1:10]), las=2, main= "ptCAF vs rtCAF",  horiz=TRUE, cex.names=0.8)
+```
+
+DENDOGRAM
+
+```{r}
+ #Convert to data matrix 
+all_matrix <- ((as.matrix(medians)))
+rownames(all_matrix)<- rownames(medians) 
+
+# Clustering for dendrogram
+row_clust <- hclust(dist(all_matrix, method = 'euclidean'), method = 'ward.D2')
+plot(row_clust, xlab="xlab", ylab="ylab", main="main", sub="")
+
+# # reduced label size
+# par(cex=0.1, mar=c(5, 8, 4, 1))
+# plot(row_clust, xlab="", ylab="", main="", sub="", axes=FALSE)
+# par(cex=1)
+# title(main="dendrogram")
+# axis(2)
+
+# Clustering for dendrogram
+t_all = t(all_matrix)
+rownames(t_all) = colnames(medians)
+col_clust <- hclust(dist(t_all, method = 'euclidean'), method = 'ward.D2')
+# plot(col_clust, xlab="xlab", ylab="ylab", main="main", sub="")
+
+# reduced label size
+par(cex=0.5, mar=c(5, 8, 4, 1))
+plot(col_clust, xlab="", ylab="", main="", sub="", axes=FALSE)
+par(cex=1)
+title(main="dendrogram")
+axis(2)
+
+# Cluster_List <- as.data.frame(clust2)
+# Cluster_List$RefSeq.Accession.Number <- rownames(Cluster_List)
+# colnames(Cluster_List) <- c("Cluster", "RefSeq.Accession.Number")
+# 
+# Clustered_All <- inner_join(all_small,Cluster_List, by = "RefSeq.Accession.Number" )
+# 
+# #Save cluster locations in an accessible csv file 
+# write.csv(Clustered_All,"All_Data_Clusters.csv", row.names = TRUE)
+```
+
+ 
