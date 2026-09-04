@@ -1,0 +1,1402 @@
+# In[1]:
+
+
+import scanpy as sc
+import pandas as pd
+from scipy.io import mmread
+import os
+from scipy.io import mmread
+
+os.chdir('/gpfs/scratch/hmz255/python_export/')
+
+# Load ALL 10x files
+matrix = mmread('matrix.mtx').T.tocsr()  # Cells x Genes, CSR format
+barcodes = pd.read_csv('barcodes.tsv', sep='\t', header=None, index_col=0, names=['barcode'])
+features = pd.read_csv('features.tsv', sep='\t', header=None, names=['gene_ids', 'gene_names', 'type'])
+
+# Create adata
+adata = sc.AnnData(X=matrix)
+adata.obs_names = barcodes.index
+adata.var_names = features['gene_names']
+
+# Load metadata (preserves mixed types)
+metadata = pd.read_csv('metadata.tsv', sep='\t', index_col=0)
+adata.obs = metadata.reindex(adata.obs_names)
+
+print(f"✅ LOADED: {adata.n_obs:,} cells × {adata.n_vars:,} genes")
+print("Groups:", adata.obs['Group'].unique())
+
+
+import scanpy as sc
+sc.set_figure_params(dpi=80, facecolor='white')
+
+# 1. Basic QC & filtering (standard scRNA-seq workflow)
+sc.pp.filter_cells(adata, min_genes=200)
+sc.pp.filter_genes(adata, min_cells=3)
+adata.var['mt'] = adata.var_names.str.startswith('MT-')
+sc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], percent_top=None, inplace=True)
+adata = adata[adata.obs.pct_counts_mt < 20, :]
+
+# 2. Normalize, HVG, PCA
+sc.pp.normalize_total(adata, target_sum=1e4)
+sc.pp.log1p(adata)
+sc.pp.highly_variable_genes(adata, min_mean=0.0125, max_mean=3, min_disp=0.5)
+sc.tl.pca(adata, svd_solver='arpack')
+
+# 3. Neighbors + UMAP (THIS creates X_umap!)
+sc.pp.neighbors(adata, n_neighbors=10, n_pcs=40)
+sc.tl.umap(adata)
+
+# 4. Leiden clustering (matches your 12 clusters)
+sc.tl.leiden(adata, resolution=0.4)
+
+# 5. Your beautiful plots work NOW!
+sc.pl.umap(adata, color=['leiden', 'Group', 'Patient'], ncols=1)
+sc.pl.violin(adata, ['n_genes_by_counts', 'total_counts', 'pct_counts_mt'], 
+             jitter=0.4, multi_panel=True, save='_qc.png')
+# Reload ORIGINAL metadata with clusters
+meta = pd.read_csv("/gpfs/scratch/hmz255/python_export/metadata.tsv", sep="\t")
+meta = meta.set_index("barcode").loc[adata.obs.index]  # Match cell order
+
+# Add clusters back (keep QC metrics too)
+for col in meta.columns:
+    if col not in adata.obs.columns:
+        adata.obs[col] = meta[col]
+
+print("✅ Clusters restored!")
+print("Available columns now:", adata.obs.columns.tolist())
+# UMAP with your original clusters
+sc.pl.umap(adata, color=['seurat_clusters'], save='_clusters.png')
+
+# Key metadata
+sc.pl.umap(adata, color=['Group', 'Patient'], save='_metadata.png', ncols=1)
+
+# QC metrics
+sc.pl.violin(adata, ['n_genes_by_counts', 'total_counts', 'pct_counts_mt'], 
+             jitter=0.4, multi_panel=True, save='_qc.png')
+
+# Check how many NAs
+print("NA count:", adata.obs['keloid_normal'].isna().sum())
+
+# Fill NAs (remove or assign based on other columns)
+adata.obs['keloid_normal'] = adata.obs['keloid_normal'].fillna('normal')  # or remove
+# OR remove NA cells entirely
+adata = adata[~adata.obs['keloid_normal'].isna()].copy()
+
+
+# In[5]:
+
+
+adata.obs['keloid_normal'] = adata.obs['Group'].replace({
+    'Keloid': 'keloid',
+    'keloid': 'keloid',
+    'Normal': 'normal',
+    'normal': 'normal',
+    'CASE': 'keloid',
+    'CTRL': 'normal'
+}).astype('category')
+
+print(adata.obs['keloid_normal'].value_counts())
+
+# Map ALL your samples to Keloid/Normal
+sample_to_group = {
+    # Keloid samples (K*, KF*, Kd*)
+    'Kd1': 'Keloid', 'Kd2': 'Keloid', 'Kd3': 'Keloid', 'Kd4': 'Keloid',
+    'KF1': 'Keloid', 'KF2': 'Keloid', 'KF3': 'Keloid',
+    'K007CASE': 'Keloid', 'K009CASE': 'Keloid', 'K012CASE': 'Keloid', 'K013CASE': 'Keloid',
+
+    # Normal samples (N*, NF*)
+    'Nsc1': 'Normal', 'Nsc2': 'Normal', 'Nsc3': 'Normal', 
+    'Nsk1': 'Normal', 'NF1': 'Normal', 'NF2': 'Normal', 'NF3': 'Normal', 'K012CTRL': 'Normal','K007CTRL':'Normal','K009CTRL':'Normal' ,'K013CTRL':'Normal'          
+}
+
+# Create the new group column
+adata.obs['sample_group'] = adata.obs['orig.ident'].map(sample_to_group).fillna('Other')
+
+print("✅ Keloid vs Normal groups created:")
+print(adata.obs['sample_group'].value_counts())
+
+# Remove MT- (mito) and RPS/RPL- (ribo) genes
+mito_genes = adata.var_names.str.startswith('MT-')
+ribo_genes = adata.var_names.str.startswith(('RPS', 'RPL'))
+
+adata = adata[:, ~mito_genes & ~ribo_genes].copy()
+
+print(f"✅ After filtering: {adata.n_obs:,} cells × {adata.n_vars:,} genes")
+print(f"Removed: {mito_genes.sum()} mito + {ribo_genes.sum()} ribo genes")
+
+
+# Merge clusters 2 and 5 into "Keratinocytes"
+keratinocyte_clusters = ['2', '5']
+adata_filtered.obs['merged_clusters'] = adata_filtered.obs['seurat_clusters'].astype(str)
+
+# Set keratinocytes as single group
+mask = adata_filtered.obs['merged_clusters'].isin(keratinocyte_clusters)
+adata_filtered.obs.loc[mask, 'merged_clusters'] = 'Keratinocytes'
+
+# Make categorical
+adata_filtered.obs['merged_clusters'] = adata_filtered.obs['merged_clusters'].astype('category')
+
+print("New cluster distribution:")
+print(adata_filtered.obs['merged_clusters'].value_counts())
+# UMAP with merged keratinocytes
+sc.pl.umap(adata_filtered, color=['seurat_clusters', 'cell_type', 'sample_group'], 
+           ncols=3, frameon=False)
+
+# Confirm with keratinocyte markers
+sc.pl.dotplot(adata_filtered, ['KRT5', 'KRT14', 'KRT1', 'KRT10'], 
+              groupby='merged_clusters', save='_kc_merged.png')
+
+# FINAL FIX - create dict with STRING keys to match your category levels
+cluster_names_str = {
+    '0': 'Mesenchymal_fibroblasts',
+    '1': 'MHCII+ endothelial cells', 
+    '2': 'Keratinocytes',  # Merged 2+5
+    '3': 'Proinflammatory_Fibroblasts',
+    '4': 'Myofibroblasts',
+    '5': 'Keratinocytes',
+    '6': 'Immune cells',
+    '7': 'Dendritic/Macrophage',
+    '8': 'Endothelial cells',
+    '9': 'Neural cells',
+
+    '10': 'Myo-like_fibroblasts',
+    '11': 'Mast cells'
+}
+
+
+sc.pl.umap(adata_filtered, color=['sample_group'], 
+           ncols=3, frameon=False)
+
+
+# In[15]:
+
+
+# Check ALL your adata objects
+print("Original adata obs:", 'seurat_clusters' in adata.obs)
+print("Filtered adata obs:", 'seurat_clusters' in adata_filtered.obs)
+
+
+# In[156]:
+
+
+fibro_markers = [
+    'COL1A1', 'COL1A2', 'DCN', 'LUM',
+    'COL3A1', 'PDGFRA', 'THY1',
+    'FAP', 'ACTA2', 'TAGLN', 'POSTN'
+]
+
+
+[g for g in fibro_markers if g in adata_filtered.var_names]
+
+
+
+
+
+
+
+def classify_sample_fixed(sample):
+    sample = str(sample)
+
+    keloid_patterns = ['KF', 'CASE', 'Kd']
+    normal_patterns = ['Nsc', 'Nsk', 'NF', 'CTRL']
+
+    if any(pattern in sample for pattern in keloid_patterns):
+        return 'Keloid'
+    elif any(pattern in sample for pattern in normal_patterns):
+        return 'Normal'
+    else:
+        return 'Unknown'
+
+
+# Classify all cells
+adata_fibro_no45.obs['sample_status'] = (
+    adata_fibro_no45.obs['orig.ident']
+    .apply(classify_sample_fixed)
+)
+
+print("Fixed counts:")
+print(adata_fibro_no45.obs['sample_status'].value_counts())
+
+print("\nSample classifications:")
+print(
+    adata_fibro_no45.obs[
+        ['orig.ident', 'sample_status']
+    ]
+    .drop_duplicates()
+    .sort_values('orig.ident')
+    .to_string(index=False)
+)
+###############FIBCLUSTERING
+fibro_clusters = ["0", "3", "4", "10"]
+adata_fibro = adata_filtered[adata_filtered.obs['seurat_clusters'].astype(str).isin(fibro_clusters)].copy()
+print(f"Fibroblast cells: {adata_fibro.n_obs:,}")
+
+
+# In[12]:
+
+
+sc.pp.scale(adata_fibro, max_value=10)
+sc.tl.pca(adata_fibro, n_comps=30)
+
+
+sc.pp.neighbors(adata_fibro, n_pcs=20)
+sc.tl.umap(adata_fibro)
+sc.tl.leiden(adata_fibro, resolution=0.2)
+
+
+# Keloid-only subset (from your custom 41K cells)
+keloid_only_mask = adata_fibro_no45.obs['sample_status'] == 'Keloid'
+adata_keloid_only = adata_fibro_no45[keloid_only_mask].copy()
+
+print("New keloid-only dataset:")
+print(f"Total cells: {adata_keloid_only.n_obs:,}")
+print("Samples:")
+print(adata_keloid_only.obs['orig.ident'].value_counts())
+print("Clusters preserved:")
+print(adata_keloid_only.obs['leiden'].value_counts())
+
+
+
+# Keloid-only subset (from your custom 41K cells)
+normal_only_mask = adata_fibro_no45.obs['sample_status'] == 'Normal'
+data_normal_only = adata_fibro_no45[normal_only_mask].copy()
+
+print("New keloid-only dataset:")
+print(f"Total cells: {data_normal_only.n_obs:,}")
+print("Samples:")
+print(data_normal_only.obs['orig.ident'].value_counts())
+print("Clusters preserved:")
+print(data_normal_only.obs['leiden'].value_counts())
+
+
+# In[31]:
+
+
+sc.pl.umap(data_normal_only, 
+           color=['leiden'], 
+           ncols=1,
+           save='leiden.png')
+
+
+########################FIB CLUSTERING#########
+ Collagen/ECM-focused fibroblast markers
+collagen_markers = [
+    'COL1A1', 'COL1A2', 'COL3A1',    # Main collagens
+    'SPARC', 'CTHRC1', 'POSTN',      # ECM/pathogenic  
+    'DCN', 'LUM', 'FBLN2'            # Matrix organization
+]
+
+sc.pl.dotplot(adata_fibro, 
+              collagen_markers, 
+              groupby='leiden', 
+              save='fibro_collagen_markers.png')
+
+
+# In[20]:
+
+
+# Remove ONLY cluster 2, KEEP original clustering/UMAP
+adata_fibro_no2 = adata_fibro[adata_fibro.obs['leiden'] != '5',].copy()
+
+# Original UMAP stays exactly the same (just missing cluster 2)
+sc.pl.umap(adata_fibro_no2, color='leiden', legend_loc='right margin')
+
+# In[19]:
+
+# Remove clusters 4 and 5
+adata_fibro_no45 = adata_fibro[
+    ~adata_fibro.obs['leiden'].isin(['4', '5'])
+].copy()
+
+# Plot using the original UMAP coordinates
+sc.pl.umap(
+    adata_fibro_no45,
+    color='leiden',
+    legend_loc='right margin'
+)
+fibro_names = {
+    '0': 'Mesenchymal',
+    '1': 'Proinflammatory',
+    '2': 'Myofibroblasts',
+    '3': 'Secretory papillary',
+}
+
+adata_fibro_no45.obs['fibro_type'] = (
+    adata_fibro_no45.obs['leiden']
+    .astype(str)
+    .map(fibro_names)
+)
+
+print(adata_fibro_no45.obs[['leiden', 'fibro_type']].head())
+print(adata_fibro_no45.obs['fibro_type'].value_counts(dropna=False))
+
+# Check
+print(adata_custom.obs["fbs_type"].value_counts())
+
+
+# In[60]:
+
+
+import scanpy as sc
+
+markers = {
+    "Mesenchymal": [
+        "POSTN", "ASPN", "ADAM12", "COL1A1", "OGN"
+    ],
+
+    "Myofibroblasts": [
+        "ACTA2", "RGS5", "TAGLN", "MYL9"
+    ],
+
+    "Proinflammatory": [
+        "APOD", "CXCL14", "C3", "TXNIP", "CCL19"
+    ],
+
+    "Secretory Papillary": [
+        "ZFP36", "ZFP36L1", "CFD", "DCN"
+    ],
+
+    "Proliferating": [
+        "NME2", "CRIP1", "EEF1G", "SNHG29", "SEPTIN7"
+    ]
+}
+
+cluster_order = [
+    "Mesenchymal",
+    "Myofibroblasts",
+    "Proinflammatory",
+    "Secretory Papillary",
+    "Proliferating"
+]
+
+adata_fibro.obs["fbs_type"] = adata_fibro.obs["leiden"].astype(str).replace({
+    "0": "Mesenchymal",
+    "1": "Proinflammatory",
+    "2": "Myofibroblasts",
+    "3": "Secretory Papillary",
+    "4": "Proliferating"
+})
+
+adata_fibro.obs["fbs_type"] = (
+    adata_fibro.obs["fbs_type"]
+    .astype("category")
+    .cat.set_categories(cluster_order, ordered=True)
+)
+
+sc.pl.dotplot(
+    adata_fibro,
+    var_names=markers,
+    groupby="fbs_type",
+    standard_scale="var",
+    swap_axes=False,
+    dendrogram=False,
+    dot_max=0.8,
+    dot_min=0.05,
+    color_map="Reds",
+    save="_fibroblast_subcluster_marker_dotplot.png"
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#################SIGNATURE############################
+
+
+
+
+import scanpy as sc
+
+# =========================
+# Gene sets
+# =========================
+
+adipocyte_genes = [
+    'EBF2',
+    'CEBPA',
+    'PPARG',
+    'ZNF423'
+]
+
+chondrocyte_genes = [
+    'MSX2',
+    'NKX2-6',
+    'DLX5',
+    'PITX1',
+    'COMP',
+    'SOX9',
+    'RUNX1',
+    'BMP2',
+    'OGN'
+]
+
+
+# =========================
+# Check genes are present
+# =========================
+
+adipocyte_present = [
+    g for g in adipocyte_genes
+    if g in adata_keloid_only.var_names
+]
+
+chondrocyte_present = [
+    g for g in chondrocyte_genes
+    if g in adata_keloid_only.var_names
+]
+
+print("Adipocyte genes found:", adipocyte_present)
+print("Chondrocyte genes found:", chondrocyte_present)
+
+
+# =========================
+# Adipocyte genes – Keloid
+# =========================
+
+sc.pl.dotplot(
+    adata_keloid_only,
+    var_names=adipocyte_present,
+    groupby='leiden',
+    cmap='Reds',
+    dot_max=0.8,
+    dot_min=0,
+    title='Adipocyte genes – Keloid fibroblasts'
+)
+
+
+# =========================
+# Chondrocyte genes – Keloid
+# =========================
+
+sc.pl.dotplot(
+    adata_keloid_only,
+    var_names=chondrocyte_present,
+    groupby='leiden',
+    cmap='Reds',
+    dot_max=0.8,
+    dot_min=0,
+    title='Chondrocyte-associated genes – Keloid fibroblasts'
+)
+
+###################################HOX GENES LOCATION CATEGORY#######################
+
+
+location_map = {
+    "K007CASE": "chest",
+    "K007CTRL": "chest",
+    "K009CASE": "chest",
+    "K009CTRL": "chest",
+    "K012CASE": "chest",
+    "K012CTRL": "chest",
+    "K013CASE": "chest",
+    "K013CTRL": "chest",
+
+    "KF1": "chest",
+    "KF2": "chest",
+    "KF3": "back",
+    "NF1": "chest",
+    "NF2": "chest",
+    "NF3": "back",
+
+    "Kd1": "chest",
+    "Kd2": "earlobe",
+    "Kd3": "earlobe",
+    "Kd4": "earlobe",
+
+    "ND1": "abdomen",
+    "Nsc1": "abdomen",
+    "Nsc2": "abdomen",
+    "Nsc3": "abdomen",
+    "Nsk1": "abdomen"
+}
+
+adata_fibro_no45.obs["anatomical_location"] = (
+    adata_fibro_no45.obs["orig.ident"]
+    .astype(str)
+    .map(location_map)
+)
+
+adata_fibro_no45.obs["anatomical_location"].value_counts(dropna=False)
+
+
+# In[65]:
+
+
+adata_fibro_no45.obs["location_status"] = (
+    adata_fibro_no45.obs["sample_status"].astype(str)
+    + "_"
+    + adata_fibro_no45.obs["anatomical_location"].astype(str)
+)
+
+adata_fibro_no45.obs["location_status"] = (
+    adata_fibro_no45.obs["location_status"].astype("category")
+)
+
+
+# In[67]:
+
+
+import numpy as np
+keloid_samples = [
+    "K007CASE", "K009CASE", "K012CASE", "K013CASE",
+    "KF1", "KF2", "KF3",
+    "Kd1", "Kd2", "Kd3", "Kd4"
+]
+
+adata_fibro_no45.obs["sample_status"] = np.where(
+    adata_fibro_no45.obs["orig.ident"].isin(keloid_samples),
+    "Keloid",
+    "Normal"
+)
+##############################BAR_CHARTS##################
+
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
+
+
+# =========================================================
+# 1. Define metadata columns
+# =========================================================
+
+sample_col = 'orig.ident'
+cluster_col = 'leiden'
+paper_col = 'paper_source'
+condition_col = 'sample_status'
+
+
+# =========================================================
+# 2. Map Leiden clusters to fibroblast cell types
+# =========================================================
+
+celltype_map = {
+    '0': 'Mesenchymal',
+    '1': 'Proinflammatory',
+    '2': 'Myofibroblast',
+    '3': 'Secretory Papillary',
+}
+
+
+# =========================================================
+# 3. Check that all required columns exist
+# =========================================================
+
+required_columns = [
+    sample_col,
+    cluster_col,
+    paper_col,
+    condition_col
+]
+
+missing_columns = [
+    col
+    for col in required_columns
+    if col not in adata_fibro_no45.obs.columns
+]
+
+if missing_columns:
+    raise KeyError(
+        f"These columns are missing from adata_fibro_no45.obs: "
+        f"{missing_columns}\n\n"
+        f"Available columns:\n"
+        f"{adata_fibro_no45.obs.columns.tolist()}"
+    )
+
+
+# =========================================================
+# 4. Create working dataframe
+# =========================================================
+
+df = adata_fibro_no45.obs[required_columns].copy()
+
+for col in required_columns:
+    df[col] = df[col].astype(str)
+
+df = df[
+    ~df[required_columns].isin(
+        ['nan', 'None', '']
+    ).any(axis=1)
+].copy()
+
+
+# =========================================================
+# 5. Map Leiden clusters to fibroblast cell types
+# =========================================================
+
+df['cell_type'] = df[cluster_col].map(celltype_map)
+
+df = df.dropna(
+    subset=['cell_type']
+).copy()
+
+
+# =========================================================
+# 6. Inspect samples and paper sources
+# =========================================================
+
+print("\n========================================")
+print("Samples, conditions and papers")
+print("========================================")
+
+print(
+    df[
+        [
+            sample_col,
+            condition_col,
+            paper_col
+        ]
+    ]
+    .drop_duplicates()
+    .sort_values(
+        [
+            condition_col,
+            paper_col,
+            sample_col
+        ]
+    )
+    .to_string(index=False)
+)
+
+
+print("\n========================================")
+print("Unique paper sources")
+print("========================================")
+
+print(
+    df[
+        [
+            paper_col,
+            condition_col
+        ]
+    ]
+    .drop_duplicates()
+    .sort_values(
+        [
+            paper_col,
+            condition_col
+        ]
+    )
+    .to_string(index=False)
+)
+
+
+# =========================================================
+# 7. Count cells per sample, condition and cell type
+# =========================================================
+
+counts = (
+    df.groupby(
+        [
+            sample_col,
+            condition_col,
+            'cell_type'
+        ],
+        observed=True
+    )
+    .size()
+    .reset_index(name='n_cells')
+)
+
+
+# =========================================================
+# 8. Calculate total cells per sample
+# =========================================================
+
+totals = (
+    df.groupby(
+        [
+            sample_col,
+            condition_col
+        ],
+        observed=True
+    )
+    .size()
+    .reset_index(name='total_cells')
+)
+
+
+# =========================================================
+# 9. Calculate percentage of each fibroblast type per sample
+# =========================================================
+
+plot_df = counts.merge(
+    totals,
+    on=[
+        sample_col,
+        condition_col
+    ],
+    how='left'
+)
+
+
+plot_df['percentage'] = (
+    plot_df['n_cells']
+    / plot_df['total_cells']
+    * 100
+)
+
+
+# =========================================================
+# 10. Add zero values for missing fibroblast types
+# =========================================================
+
+celltype_order = [
+    'Mesenchymal',
+    'Myofibroblast',
+    'Proinflammatory',
+    'Secretory Papillary'
+]
+
+
+sample_metadata = (
+    df[
+        [
+            sample_col,
+            condition_col,
+            paper_col
+        ]
+    ]
+    .drop_duplicates(
+        subset=[sample_col]
+    )
+)
+
+
+complete_index = pd.MultiIndex.from_product(
+    [
+        sample_metadata[sample_col].unique(),
+        celltype_order
+    ],
+    names=[
+        sample_col,
+        'cell_type'
+    ]
+)
+
+
+complete_df = (
+    complete_index
+    .to_frame(index=False)
+    .merge(
+        sample_metadata,
+        on=sample_col,
+        how='left'
+    )
+)
+
+
+plot_df = complete_df.merge(
+    plot_df[
+        [
+            sample_col,
+            condition_col,
+            'cell_type',
+            'n_cells',
+            'total_cells',
+            'percentage'
+        ]
+    ],
+    on=[
+        sample_col,
+        condition_col,
+        'cell_type'
+    ],
+    how='left'
+)
+
+
+plot_df['n_cells'] = (
+    plot_df['n_cells']
+    .fillna(0)
+)
+
+
+plot_df['percentage'] = (
+    plot_df['percentage']
+    .fillna(0)
+)
+
+
+# =========================================================
+# 11. Restore total cell numbers
+# =========================================================
+
+sample_totals = (
+    totals[
+        [
+            sample_col,
+            'total_cells'
+        ]
+    ]
+    .drop_duplicates()
+)
+
+
+plot_df = (
+    plot_df
+    .drop(
+        columns=['total_cells'],
+        errors='ignore'
+    )
+    .merge(
+        sample_totals,
+        on=sample_col,
+        how='left'
+    )
+)
+
+
+# =========================================================
+# 12. Keep only Keloid and Normal samples
+# =========================================================
+
+plot_df = plot_df[
+    plot_df[condition_col].isin(
+        [
+            'Keloid',
+            'Normal'
+        ]
+    )
+].copy()
+
+
+# =========================================================
+# 13. Define bar colours
+# =========================================================
+
+condition_palette = {
+    'Keloid': '#1f77b4',
+    'Normal': '#ff7f0e'
+}
+
+
+condition_order = [
+    'Keloid',
+    'Normal'
+]
+
+
+# =========================================================
+# 14. Define PAPER colours
+# =========================================================
+#
+# IMPORTANT:
+# Points are coloured according to paper_source,
+# NOT according to individual sample.
+#
+# Add every paper name that appears in your dataset here.
+# =========================================================
+
+paper_palette = {
+    'Deng et al': '#1f77b4',       # blue
+    'Li et al': '#d62728',         # red
+    'Direder et al': '#2ca02c',    # green
+    'Liu et al': '#9467bd',        # purple
+    'NDFs': '#ff7f0e'              # orange
+}
+
+
+# =========================================================
+# 15. Automatically warn if a paper is missing from palette
+# =========================================================
+
+papers_in_data = (
+    plot_df[paper_col]
+    .dropna()
+    .unique()
+    .tolist()
+)
+
+
+missing_papers = [
+    paper
+    for paper in papers_in_data
+    if paper not in paper_palette
+]
+
+
+if missing_papers:
+
+    print("\n========================================")
+    print("WARNING: papers missing from paper_palette")
+    print("========================================")
+
+    for paper in missing_papers:
+        print(paper)
+
+    print(
+        "\nThese papers will appear grey until you add "
+        "them to paper_palette."
+    )
+
+
+# =========================================================
+# 16. Define X-axis positions
+# =========================================================
+
+celltype_to_x = {
+    cell_type: index
+    for index, cell_type
+    in enumerate(celltype_order)
+}
+
+
+# =========================================================
+# 17. Define offsets for Keloid and Normal
+# =========================================================
+
+condition_offsets = {
+    'Keloid': -0.2,
+    'Normal': 0.2
+}
+
+
+plot_df['x_pos'] = (
+    plot_df['cell_type']
+    .map(celltype_to_x)
+    .astype(float)
+)
+
+
+plot_df['offset'] = (
+    plot_df[condition_col]
+    .map(condition_offsets)
+    .astype(float)
+)
+
+
+plot_df['x_bar'] = (
+    plot_df['x_pos']
+    + plot_df['offset']
+)
+
+
+# =========================================================
+# 18. Calculate mean and SD across samples
+# =========================================================
+
+bar_df = (
+    plot_df.groupby(
+        [
+            'cell_type',
+            condition_col
+        ],
+        observed=True,
+        as_index=False
+    )
+    .agg(
+        mean_percentage=(
+            'percentage',
+            'mean'
+        ),
+        sd_percentage=(
+            'percentage',
+            'std'
+        ),
+        n_samples=(
+            sample_col,
+            'nunique'
+        )
+    )
+)
+
+
+bar_df['sd_percentage'] = (
+    bar_df['sd_percentage']
+    .fillna(0)
+)
+
+
+bar_df['x_pos'] = (
+    bar_df['cell_type']
+    .map(celltype_to_x)
+    .astype(float)
+)
+
+
+bar_df['offset'] = (
+    bar_df[condition_col]
+    .map(condition_offsets)
+    .astype(float)
+)
+
+
+bar_df['x_bar'] = (
+    bar_df['x_pos']
+    + bar_df['offset']
+)
+
+
+# =========================================================
+# 19. Print summary statistics
+# =========================================================
+
+print("\n========================================")
+print("Summary statistics")
+print("========================================")
+
+print(
+    bar_df[
+        [
+            'cell_type',
+            condition_col,
+            'n_samples',
+            'mean_percentage',
+            'sd_percentage'
+        ]
+    ]
+    .sort_values(
+        [
+            'cell_type',
+            condition_col
+        ]
+    )
+    .to_string(index=False)
+)
+
+
+# =========================================================
+# 20. Create figure
+# =========================================================
+
+rng = np.random.default_rng(42)
+
+fig, ax = plt.subplots(
+    figsize=(14, 7)
+)
+
+
+# =========================================================
+# 21. Plot mean bars with SD error bars
+# =========================================================
+
+for _, row in bar_df.iterrows():
+
+    ax.bar(
+        x=row['x_bar'],
+        height=row['mean_percentage'],
+        width=0.35,
+
+        color=condition_palette.get(
+            row[condition_col],
+            'gray'
+        ),
+
+        alpha=0.35,
+
+        edgecolor='black',
+        linewidth=0.8,
+
+        yerr=row['sd_percentage'],
+        capsize=5,
+
+        error_kw={
+            'elinewidth': 1.5,
+            'capthick': 1.5,
+            'ecolor': 'black'
+        },
+
+        zorder=2
+    )
+
+
+# =========================================================
+# 22. Add individual sample points
+#     COLOUR = PAPER SOURCE
+# =========================================================
+
+for _, row in plot_df.iterrows():
+
+    jitter = rng.uniform(
+        -0.045,
+        0.045
+    )
+
+
+    point_colour = paper_palette.get(
+        row[paper_col],
+        'gray'
+    )
+
+
+    ax.scatter(
+        row['x_bar'] + jitter,
+        row['percentage'],
+
+        color=point_colour,
+
+        edgecolor='black',
+        linewidth=0.7,
+
+        s=65,
+        alpha=0.9,
+
+        zorder=10
+    )
+
+
+# =========================================================
+# 23. Format X-axis
+# =========================================================
+
+ax.set_xticks(
+    range(
+        len(celltype_order)
+    )
+)
+
+
+ax.set_xticklabels(
+    celltype_order,
+    rotation=45,
+    ha='right'
+)
+
+
+# =========================================================
+# 24. Format Y-axis
+# =========================================================
+
+ax.set_ylabel(
+    'Percentage of cells per sample (%)',
+    fontsize=12
+)
+
+
+ax.set_xlabel(
+    'Fibroblast cell type',
+    fontsize=12
+)
+
+
+ax.set_title(
+    'Fibroblast cell-type composition across samples\n'
+    'Mean ± standard deviation',
+    fontsize=14
+)
+
+
+ax.set_ylim(
+    bottom=0
+)
+
+
+# =========================================================
+# 25. Remove unnecessary spines
+# =========================================================
+
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+
+
+# =========================================================
+# 26. Add horizontal grid
+# =========================================================
+
+ax.grid(
+    axis='y',
+    linestyle='--',
+    alpha=0.3,
+    zorder=0
+)
+
+
+# =========================================================
+# 27. Create condition legend
+# =========================================================
+
+condition_legend = [
+    Patch(
+        facecolor=condition_palette[condition],
+        edgecolor='black',
+        alpha=0.35,
+        label=condition
+    )
+
+    for condition in condition_order
+
+    if condition in plot_df[
+        condition_col
+    ].unique()
+]
+
+
+# =========================================================
+# 28. Create PAPER SOURCE legend
+# =========================================================
+
+paper_legend = [
+    Line2D(
+        [0],
+        [0],
+
+        marker='o',
+
+        linestyle='None',
+
+        label=paper,
+
+        markerfacecolor=colour,
+
+        markeredgecolor='black',
+
+        markersize=8
+    )
+
+    for paper, colour
+    in paper_palette.items()
+
+    if paper in plot_df[
+        paper_col
+    ].unique()
+]
+
+
+# =========================================================
+# 29. Add condition legend
+# =========================================================
+
+legend1 = ax.legend(
+    handles=condition_legend,
+
+    title='Condition',
+
+    bbox_to_anchor=(
+        1.02,
+        1
+    ),
+
+    loc='upper left',
+
+    frameon=False
+)
+
+
+ax.add_artist(legend1)
+
+
+# =========================================================
+# 30. Add paper-source legend
+# =========================================================
+
+ax.legend(
+    handles=paper_legend,
+
+    title='Paper source',
+
+    bbox_to_anchor=(
+        1.02,
+        0.68
+    ),
+
+    loc='upper left',
+
+    frameon=False
+)
+
+
+# =========================================================
+# 31. Adjust layout
+# =========================================================
+
+plt.tight_layout()
+
+
+# =========================================================
+# 32. Display figure
+# =========================================================
+
+plt.show()
+
+
+# In[70]:
+
+
+adata_keloid = adata_fibro_no45[
+    adata_fibro_no45.obs["location_status"].str.startswith("Keloid_")
+].copy()
+
+sc.pl.dotplot(
+    adata_keloid,
+    var_names=hox_genes,
+    groupby="location_status",
+    standard_scale="var",
+    cmap="RdYlBu_r")
+
+
+# In[75]:
+
+
+adata_normal = adata_fibro_no45[
+    adata_fibro_no45.obs["location_status"].str.startswith("Normal_")
+].copy()
+
+sc.pl.dotplot(
+    adata_normal,
+    var_names=hox_genes,
+    groupby="location_status",
+    standard_scale="var",
+    cmap="RdYlBu_r")
+
+
+# In[76]:
+
+
+adata_keloid = adata_fibro_no45[
+    adata_fibro_no45.obs["location_status"].str.startswith("Keloid_")
+].copy()
+
+sc.pl.dotplot(
+    adata_keloid,
+    var_names=hox_genes,
+    groupby="location_status",
+    standard_scale="var",
+    cmap="RdYlBu_r",
+    dot_min=0,
+    dot_max=0.4,
+    smallest_dot=0
+)
+
+
+# In[77]:
+
+
+# Normal samples
+adata_normal = adata_fibro_no45[
+    adata_fibro_no45.obs["location_status"].str.startswith("Normal_")
+].copy()
+
+sc.pl.dotplot(
+    adata_normal,
+    var_names=hox_genes,
+    groupby="location_status",
+    standard_scale="var",
+    cmap="RdYlBu_r",
+    dot_min=0,
+    dot_max=0.4,
+    smallest_dot=0
+)
+
